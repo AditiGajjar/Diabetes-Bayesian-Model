@@ -1,0 +1,697 @@
+---
+title: "STAT 415 Project - Logistic Regression for Predicting Diabetes in Pima Native American Women"
+author: "Aditi Gajjar, Melissa Melton, & Richa Puranik"
+date: "3/11/2022"
+output:   
+  rmdformats::downcute:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+setwd("C:/Users/mnmel/Dropbox/My PC (DESKTOP-LADSL8H)/Downloads/STAT 415")
+
+## R Markdown
+
+```{r, warning = FALSE, message = FALSE}
+library(ggplot2)
+library(rjags)
+library(bayesplot)
+library(here)
+library(tidyverse)
+library(ggpmisc)
+```
+
+## Motivation
+
+Diabetes is a chronic health condition that occurs when there are high levels of blood glucose in a person's body. It can cause such problems as heart disease, vision loss, and kidney disease. Type 1 diabetes is thought to be caused by an autoimmune reaction in which the body struggles to produce insulin, while type 2 diabetes occurs when the body fails to use insulin efficiently, resulting in abnormal blood sugar levels. About 90-95% of people with diabetes have type 2 diabetes. Type 2, unlike type 1, can be prevented or delayed with positive lifestyle changes^[[Source: CDC](https://www.cdc.gov/diabetes/basics/diabetes.html)].
+
+Although approximately 1 in 9 women in the United States battle diabetes, this disease is especially prevalent among Native American women. The CDC estimates^[[Source: CDC](https://www.cdc.gov/diabetes/pdfs/data/statistics/national-diabetes-statistics-report.pdf)] that about 15% of Native Americans suffer from diabetes, and for Arizona's Pima tribe for whom are data was collected, this number is even higher. According to a 2006 journal article^[[Source: Diabetes Journals](https://diabetesjournals.org/care/article/29/8/1866/28611/Effects-of-Traditional-and-Western-Environments-on)] by Diabetes Care, the prevalence of type 2 diabetes in Pima Native Americans is about 38%. In fact, they have the highest prevalence rate ever recorded of any Native American population. That exact percentage as of 2020 is unclear, but a 2015 study^[[Source: NCBI](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4418458/)] at Northern Arizona University proposed that in recent years, that number has approached 50%. Since this is such a large increase, we have quite a bit of uncertainty about the true proportion of Pima women who have diabetes. Risk factors of type 2 diabetes have been shown to include obesity, physical inactivity, breast-feeding, and much more. Using Bayesian methods, we will propose a logistic regression model that can help us better predict the probability a given Pima woman suffers from diabetes, given three factors: the number of pregnancies she has experienced, her plasma glucose concentration (in mg/dL) after a 2-hour oral glucose tolerance test, and her BMI (kg/m^2).  
+
+## Prior Distribution and Prior Prediction
+
+The intercept in our regression model effectively represents the log odds of diabetes for a Pima Native American woman who has had no pregnancies, a plasma glucose concentration of 0 mg/dL after a 2-hour oral glucose tolerance test (OGTT), and a BMI of 0. Since we have quite a bit of uncertainty about the value of this intercept term, we started with a value for mu that would give us a probability of 0.16 that a woman had diabetes (about the same as the probability an average Native American woman would have diabetes).To obtain the log odds of diabetes, we take ln(pi/1-pi) = ln(.16/(1-.16)), which is approximately -1.7. We also chose a large standard deviation to reflect our uncertainty around this parameter. After some experimentation, we decided on a value of 0.6, and we found that about 95% of our intercept terms would be between 0.055 and 0.607, through the following computations:
+
+$(e^{-1.7} - 2*0.6, e^{-1.7} + 2*0.6) = (.055, .607)$ 
+
+$(\frac{.055}{1.055}, \frac{.607}{1.607}) = (.052, .378)$
+
+So, for a Pima woman with no pregnancies, a glucose concentration of 0, and a BMI of 0, the probability of diabetes could be between 5.2% and 37.8%.
+
+Our first coefficient, beta1, represents the predicted increase in the log odds of diabetes for each additional pregnancy a woman has had. We might estimate that on average, each pregnancy increases the odds of diabetes by 1%. Then, taking the natural log of 1.01, we obtain a value of about 0.01, which we will use for mu. For the standard deviation of beta1, we chose a value of 0.008. Using the properties of the normal distribution, about 95% of slope coefficients for beta1 will be between (0.01 - 2 * 0.008, 0.01 + 2 * 0.008). More meaningfully, after exponentiating the endpoints, we would expect that the multiplicative change in the odds of diabetes for each pregnancy is between 0.994 (-0.6%) and 1.026 (2.63%).
+
+Our second coefficient, beta2, represents the predicted increase in the log odds of diabetes for each additional mg/dL in glucose concentration after a two-hour oral glucose tolerance test (OGTT). We know the coefficient in front of beta will be smaller than the one for beta1, since these scores can reach upwards of 200 for individuals with diabetes, and are generally 140 or below for people without diabetes^[[Source: Mayo Clinic](https://www.mayoclinic.org/tests-procedures/glucose-tolerance-test/about/pac-20394296#:~:text=If%20you're%20being%20tested%20for%20type%202%20diabetes%2C%20two,impaired%20glucose%20tolerance%2C%20or%20prediabetes.)]. We estimate that perhaps the odds of diabetes increase by about 0.005, or 0.05%, for each additional mg/dL in glucose concentration. Using a standard deviation of 0.00055, we can obtain the endpoints (e^.005 - 2 * 0.00055, e^0.005 + 2 * 0.00055) for 95% of slope coefficients for beta2. So, we would expect that the increase in the odds of diabetes for each additional mg/dL in glucose concentration would be between about 0.39% and 0.611%.
+
+Finally, the coefficient beta3 represents the predicted increase in the log odds of diabetes for each additional kg/m^2 in BMI. We estimate this coefficient will be a little larger than the one on beta2, since BMI takes a smaller range of values, but is likely still significant in predicting diabetes. If we set mu to be 0.009, and sigma to be 0.0006, using a similar process as before, we expect that the multiplicative change in the odds of diabetes for each additional kg/m^2 in BMI would be between 1.0078 (0.78%) and 1.0103 (1.03%).
+
+To model data Y[i], we chose a Bernoulli distribution because our response variable has two possible discrete values - 0 & 1 (you either have diabetes or not). Our likelihood then represents the log(odds that a woman in the Pima tribe has diabetes) given the number of pregnancies she has undergone, her plasma glucose levels, and her BMI. We assume a linear relationship between these predictors and the log(odds that a woman in the Pima tribe has diabetes). 
+
+To evaluate our prior distribution, we created a prior predictive distribution by first simulating values of x1, x2, and x3. Then, given these values, we simulated a value Y from a Bernoulli distribution with a probability based on our logit model.
+
+$Y_i ~ \sim {\sf Bernoulli(\pi_i)}$  
+
+The logit model took the form:
+
+$ln(\frac{\pi}{1-\pi}) = \beta_0 + \beta_1 * x_1 + \beta_2 * x_2 + \beta_3 * x_3$
+
+Then, to obtain the probability $\pi that a given patient has diabetes, we took
+
+$\pi_i = \frac{e^{\beta_0 + \beta_1 * x_{i1} + \beta_2 * x_{i2} + \beta_3 * x_{i3}}}{1+e^{\beta_0 + \beta_1 * x_{i1} + \beta_2 * x_{i2} + \beta_3 * x_{i3}}}$ 
+
+Finally, we plotted the simulated Y values, to observe the distribution of patients diagnosed as having versus not having diabetes.
+
+This process of prior predictive checking took a lot of work, and led to a lot of adjustments in the values of the prior distributions for the four beta values. For example, some of our experimental priors led to predictive distributions in which over 80% of the Pima women sampled were predicted to have diabetes. When this happened, we decreased the means of the normal distributions for the betas, and also tried different standard deviations. We also experienced prior predictive distributions in which only about 10% of Pima women were predicted to have diabetes. Clearly, the effect of the beta coefficients was being underestimated, so we had to do some more tuning in order for the final prediction to be something more reasonable. Given what we knew about the rate of diabetes in America's Pima community, we knew the number would most likely be between 30-50%. Ultimately, when we achieved a prior predictive distribution in which the predicted percentage of Pima women with diabetes was around 32% for the values of the x's we had simulated, and the interpretations of the coefficients on our predictors were logical, we were satisfied enough to proceed with simulating the posterior distribution.
+
+The code below simulates possible values for the number of pregnancies a woman of Pima heritage might have, potential plasma glucose concentrations of Pima women after a 2 hour oral glucose test, and possible Body Mass Index values of women in the Pima tribe. The code then simulates values from our beta0, beta1, beta2, and beta3 prior distributions and formulates a prior probability of diabetes diagnosis among native women of Pima heritage.
+
+
+```{r}
+Nrep = 10000
+
+x1 = rnorm(Nrep, 3, 1) # possible values of pregnancies
+x2 = rnorm(Nrep, 120, 30) # possible values of plasma glucose concentration after 2-hour OGTT
+x3 = rnorm(Nrep, 28, 6.5) # possible values of BMI
+
+beta0 = rnorm(Nrep, -1.7, 0.6)
+beta1 = rnorm(Nrep, 0.01, 0.008)
+beta2 = rnorm(Nrep, 0.005, 0.00055)
+beta3 = rnorm(Nrep, 0.009, 0.0006)
+
+prob = exp(beta0 + beta1*x1 + beta2*x2 + beta3*x3)/(1+ exp(beta0 + beta1*x1 + beta2*x2 + beta3*x3))
+y = rbinom(Nrep, 1, prob)
+prior_table <- data.frame(
+  Mean_Probability = (mean(prob)),
+  Mean_Y = (mean(y))
+)
+knitr::kable(prior_table, col.names = c("Mean Probability", "Mean Y"))
+```
+
+Next, we created a pie chart to visualize the proportion of women the model predicted to be diagnosed with diabetes. As noted in the table, about 32% of the predicted Y values represented a diabetes diagnosis. This aligns with how the model determined that the probability of diabetes for a typical Pima woman was about 33%.
+
+```{r plotting simulated predicted proportion}
+y <- data.frame(y)
+size_no_diabetes <- y %>%
+  filter(y == 0) %>%
+  count() %>%
+  pull()
+size_diabetes <- y %>%
+  filter(y == 1) %>%
+  count() %>%
+  pull()
+
+data <- data.frame(
+  Diagnosis=c("No Diabetes", "Diabetes"),
+  Count=c(size_no_diabetes, size_diabetes)
+)
+
+ggplot(data, aes(x="", y=Count, fill=Diagnosis)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  scale_fill_brewer(palette = "Set1") +
+  ggtitle("Simulated Prior Predictive Proportion of Pima Women with Diabetes") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Here, we constructed prior credible intervals for the predictor variables. These values have been exponentiated so that we get the impact of a one-unit increase in these variables on the odds of diabetes, rather than on the log odds of diabetes, which is harder to interpret.
+
+```{r 50 prior credible intervals}
+prior_table <- data.frame(
+  v0 = c("Lower", "Upper"),
+  v1 = quantile(exp(beta1), c(.25, .75)),
+  v2 = quantile(exp(beta2), c(.25, .75)),
+  v3 = quantile(exp(beta3), c(.25, .75)))
+
+knitr::kable(prior_table, col.names = c("", "Number of Pregnancies", "Glucose", "BMI"))
+```
+
+Our 50% credible intervals reveal that there's a 50% prior probability that each pregnancy increases the odds of diabetes for a Pima woman by between about 0.46% and 1.54%. There's a 50% prior probability that each additional mg/dL in plasma glucose concentration increases the odds of diabetes for a Pima woman by between about 0.46% and 0.54%. And finally, there's a 50% prior probability that each additional kg/m^2 in BMI increases the odds of diabetes for a Pima woman by between about 0.86% and 0.94%.
+
+```{r 98 prior credible intervals}
+prior_table <- data.frame(
+  v0 = c("Lower", "Upper"),
+  v1 = quantile(exp(beta1), c(.01, .99)),
+  v2 = quantile(exp(beta2), c(.01, .99)),
+  v3 = quantile(exp(beta3), c(.01, .99)))
+
+knitr::kable(prior_table, col.names = c("", "Number of Pregnancies", "Glucose", "BMI"))
+```
+
+Our 50% credible intervals reveal that there's a 98% prior probability that the multiplicative change in the odds of diabetes for a Pima woman is between 0.99 and 1.029 for each pregnancy. There's a 98% prior probability that each additional mg/dL in plasma glucose concentration increases the odds of diabetes for a Pima woman by between about 0.37% and 0.63%. And finally, there's a 98% prior probability that each additional kg/m^2 in BMI increases the odds of diabetes for a Pima woman by between about 0.76% and 1.04%.
+
+## The Data
+
+Our data was collected by the National Institute of Diabetes and Digestive and Kidney Diseases, part of the U.S. Department of Health and Human Services, and was uploaded to Kaggle^[[Source: Kaggle](https://www.kaggle.com/uciml/pima-indians-diabetes-database)]. All patients in the dataset are females at least 21 years old of Pima Native American heritage.
+
+```{r}
+diabetes <- read_csv(here("diabetes.csv"))
+diabetes$Outcome <- as.factor(diabetes$Outcome)
+y = diabetes$Outcome
+x1 = diabetes$Pregnancies
+x2 = diabetes$Glucose
+x3 = diabetes$BMI
+n=length(y)
+```
+
+To evaluate the data, we created density plots of the three predictors, both across all women in the sample, and separated by diagnosis. We also created tables of the summary statistics for each variable.
+
+```{r histogram Pregnancies}
+# based on the summary(x1) values
+summary_x1 <- data.frame(Summary = c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."), 
+                      Value = c(0.000, 1.000, 3.000, 3.845, 6.000, 17.000))
+
+library(ggpmisc)
+ggplot(diabetes, aes(Pregnancies)) +
+  geom_density(fill = "#C70039", alpha = 1, color = "#C70039") +
+  ylab("Density") +
+  ggtitle("Distribution of Number of Pregnancies") +
+  annotate(geom = "table", x = 15,
+           y = 0.15,label = list(summary_x1), size = 5) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+```{r}
+library(ggridges)
+
+ggplot(diabetes, aes(x = Pregnancies, y = Outcome)) +
+  geom_density_ridges(scale = 0.8, fill = "#C70039", color = "#C70039") +
+  xlab("Number of Pregnancies") +
+  ylab("Diagnosis") +
+  ggtitle("Number of Pregnancies vs. Diagnosis") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+```{r histogram Glucose}
+# based on the summary(x2) values
+summary_x2 <- data.frame(Summary = c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."), 
+                      Value = c(0.0, 99.0, 117.0, 120.9, 140.2, 199.0))
+
+library(ggpmisc)
+ggplot(diabetes, aes(Glucose)) +
+  geom_density(fill = "dodgerblue3", alpha = 1, color = "dodgerblue3") +
+  ylab("Density") +
+  ggtitle("Distribution of Glucose Level") +
+  annotate(geom = "table", x = 10,
+           y = 0.005,label = list(summary_x2), size = 5)  +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+ggplot(diabetes, aes(x = Glucose, y = Outcome)) +
+  geom_density_ridges(scale = 0.8, fill = "dodgerblue3", color = "dodgerblue3") +
+  xlab("Glucose Level") +
+  ylab("Diagnosis") +
+  ggtitle("Glucose Level vs. Diagnosis") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r histogram BMI}
+# based on the summary(x3) values
+summary_x3 <- data.frame(Summary = c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."), 
+                      Value = c(0.00, 27.30, 32.00, 31.99, 36.60, 67.10))
+
+library(ggpmisc)
+ggplot(diabetes, aes(BMI)) +
+  geom_density(fill = "#5B17B5", alpha = 1, color = "#5B17B5") +
+  ylab("Density") +
+  ggtitle("Distribution of BMI") +
+  annotate(geom = "table", x = 69,
+           y = 0.055,label = list(summary_x3), size = 5) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+ggplot(diabetes, aes(x = BMI, y = Outcome)) +
+  geom_density_ridges(scale = 0.8, fill = "#5B17B5", color = "#5B17B5") +
+  xlab("BMI") +
+  ylab("Diagnosis") +
+  ggtitle("BMI vs. Diagnosis") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+These plots demonstrate that women who were diagnosed with diabetes tended to have experienced more pregnancies, had higher plasma glucose concentration levels, and had higher BMIs. Seeing that the mean BMI in this dataset would be classified as obese, and there were many women who had experienced a large number of pregnancies (some women with upwards of 16), aligns with our research findings that Pima women are experiencing diabetes at higher rates than most of the population.
+
+## JAGS - Posterior Distribution
+
+To simulate the posterior distribution, we used JAGS to run the model with 5 chains and 10,000 iterations.
+
+```{r}
+#re-uploading the data in order to ensure variables are of right type
+diabetes <- read_csv(here("diabetes.csv"))
+y = diabetes$Outcome
+x1 = diabetes$Pregnancies
+x2 = diabetes$Glucose
+x3 = diabetes$BMI
+```
+
+
+```{r}
+x1c = x1 - mean(x1)
+x2c = x2 - mean(x2)
+x3c = x3 - mean(x3)
+
+
+model_string <- "model{
+
+# Likelihood
+  for(i in 1:n){
+  y[i] ~ dbern(prob[i])
+  logit(prob[i]) <- beta[1] + beta[2]*x1c[i] + beta[3]*x2c[i] + beta[4]*x3c[i]
+    }
+  
+# Prior for beta's
+  beta[1] ~ dnorm(-1.7, 1 / 0.6^2)
+  beta[2] ~ dnorm(0.01, 1 / 0.008^2)
+  beta[3] ~ dnorm(0.005, 1 / 0.00055^2)
+  beta[4] ~ dnorm(0.009, 1 / 0.0006^2)
+}"
+
+model <- jags.model(textConnection(model_string),
+                    data = list(n = n, y = y, x1c = x1c, x2c = x2c, x3c = x3c),
+                    n.chains = 5)
+```
+
+
+
+```{r}
+# burn in for first 1000 samples
+update(model, 1000, progress.bar = 'none')
+
+posterior_sample <- coda.samples(model, variable.names = c('beta'), n.iter = 10000, progress.bar = 'none')
+
+summary(posterior_sample)
+```
+
+# Model Diagnostics & Analysis
+
+Before moving forward with posterior inference, we ran some diagnostics on our model to check if our model produces representative samples of the target distribution and if the estimates are characteristic of the distribution. 
+
+```{r}
+mcmc_trace(posterior_sample)
+```
+
+The trace plots for each of our parameters satisfies a "fat hairy caterpillar" shape indicating that the degree of dependence is neither too high nor too low for each predictor variable and beta0. 
+
+```{r}
+mcmc_acf(posterior_sample)
+```
+
+For each chain for each beta parameter, the auto-correlation plot decays to 0 relatively quickly (after a burn in period of 1000 steps) indicating a relative level of independence between samples.
+
+```{r}
+params = as.matrix(posterior_sample)
+beta0 = params[, 1]
+beta1 = params[, 2]
+beta2 = params[, 3]
+beta3 = params[, 4]
+```
+
+
+source("DBDA2E-utilities.R")
+```{r}
+source("DBDA2E-utilities.R")
+plotPost(exp(beta0))
+plotPost(exp(beta1))
+plotPost(exp(beta2))
+plotPost(exp(beta3))
+```
+
+
+# Posterior Inference
+
+```{r}
+beta0_sim = as.matrix(exp(beta0))
+print(c("Mean: ", mean(beta0_sim)))
+print(c("SD: ", sd(beta0_sim)))
+prior_table <- data.frame(
+  Values = c("/ 1% Lower:", "/ 99% Upper:"),
+  v3 = quantile(beta0_sim, c(0.25, 0.75)),
+  v4 = quantile(beta0_sim, c(0.01, 0.99)))
+
+knitr::kable(prior_table, col.names = c("", "50% Quantile", "98% Quantile"))
+```
+
+Our mean posterior probability of a diabetes diagnosis for Pima women who have experienced no pregnancies, have a plasma glucose concentration of 0 mg/dl, and have a BMI of 0 kg/m^2, is around 0.22. However, in reality this human does not exist and therefore an inference for our posterior beta0 distribution does not make sense in this context.
+
+```{r}
+beta1_sim = as.matrix(exp(beta1))
+print(c("Mean: ", mean(beta1_sim)))
+print(c("SD: ", sd(beta1_sim)))
+prior_table <- data.frame(
+  Values = c("/ 1% Lower:", "/ 99% Upper:"),
+  v3 = quantile(beta1_sim, c(0.25, 0.75)),
+  v4 = quantile(beta1_sim, c(0.01, 0.99)))
+
+knitr::kable(prior_table, col.names = c("", "50% Quantile", "98% Quantile"))
+```
+According to our posterior distribution, on average, an increase by one pregnancy that a woman of Native Pima heritage experiences, results in an increase in the odds that she has diabetes by a factor of 1.01 holding all other variables constant. There is a 50% posterior probability that the multiplicative change in the odds of diabetes for each additional pregnancy is between about 1.0046 and 1.015 and it is 45 times more likely that the odds of diabetes after each additional pregnancy increases by a rate of about 0.99 to 1.028.
+
+```{r}
+beta2_sim = as.matrix(exp(beta2))
+print(c("Mean: ", mean(beta2_sim)))
+print(c("SD: ", sd(beta2_sim)))
+prior_table <- data.frame(
+  Values = c("/ 1% Lower:", "/ 99% Upper:"),
+  v3 = quantile(beta2_sim, c(0.25, 0.75)),
+  v4 = quantile(beta2_sim, c(0.01, 0.99)))
+
+knitr::kable(prior_table, col.names = c("", "50% Quantile", "98% Quantile"))
+```
+According to our posterior distribution, on average, an increase in the concentration of plasma glucose after a 2 hour oral glucose test by 1 mg/dl results in a increase in the odds that the given Pima woman has diabetes by a factor of around 1.005 holding all other variables constant. There is a 50% posterior probability that the multiplicative change in the odds of diabetes for each additional mg/dl of plasma glucose content is between about 1.0046 and 1.0053 and it is 45 times more likely that the odds of diabetes after each additional pregnancy increases by a rate of about 1.0037 to 1.0063.
+
+```{r}
+beta3_sim = as.matrix(exp(beta3))
+print(c("Mean: ", mean(beta3_sim)))
+print(c("SD: ", sd(beta3_sim)))
+prior_table <- data.frame(
+  Values = c("/ 1% Lower:", "/ 99% Upper:"),
+  v3 = quantile(beta3_sim, c(0.25, 0.75)),
+  v4 = quantile(beta3_sim, c(0.01, 0.99)))
+
+knitr::kable(prior_table, col.names = c("", "50% Quantile", "98% Quantile"))
+```
+According to our posterior distribution, on average, an increase in BMI by 1 kg/m^2 results in an increase in the odds that she has diabetes by a factor of 1.009 holding all other variables constant. There is a 50% posterior probability that the multiplicative change in the odds of diabetes for each additional kg/m^2 is between about 1.0086 and 1.009 and it is 45 times more likely that the odds of diabetes after each additional pregnancy increases by a rate of about 1.0076 to 1.01.
+
+
+
+```{r}
+Nrep = 1000
+
+x1 = rnorm(Nrep, 3.8, 3.36) # possible values of pregnancies
+x2 = rnorm(Nrep, 121, 30) # possible values of plasma glucose concentration after 2-hour OGTT
+x3 = rnorm(Nrep, 28, 6.5) # possible values of BMI
+
+#standardizing the log(odds of diabetes diagnosis)
+prob_ex = beta0 + beta1 * (2-mean(x1)) + beta2 * (100-mean(x2)) + beta3 * (25-mean(x3))
+exp_prob_ex = exp(prob_ex) / (1 + exp(prob_ex))
+prob_sim = as.matrix(exp_prob_ex)
+
+mean(prob_sim)
+quantile(prob_sim, c(0.25, 0.75))
+quantile(prob_sim, c(0.01, 0.99))
+
+y = rbinom(Nrep, 1, prob_sim)
+hist(exp_prob_ex)
+plot(y)
+
+```
+
+According to our posterior distribution, on average, a one unit increase in pregnancies experienced, an increase in the concentration of plasma glucose after a 2 hour oral glucose test by 1 mg/dl, and an increase in BMI by 1 kg/m^2 results in an increase in the odds that a woman of native Pima heritage is diagnosed with diabetes by a factor of 0.15 - a decrease from our initial prior estimate and more reflective of CDC claims. Furthermore, there is a 50% posterior probability that the multiplicative change in the odds of diabetes diagnosis for a one unit increase in each of the predictors is between about 0.095 and 0.189 and it is 45 times more likely that the odds of diabetes, after a one unit increase in each predictor, increase by a rate of about 0.0364 to 0.386.
+
+
+
+# Sensitivity Analysis
+```{r low prior}
+Nrep = 1000
+
+x1 = rnorm(Nrep, 2, 2) # possible values of pregnancies
+x2 = rnorm(Nrep, 100, 30) # possible values of plasma glucose concentration after 2-hour OGTT
+x3 = rnorm(Nrep, 25, 6.5) # possible values of BMI
+
+beta0 = rnorm(Nrep, -2.5, 0.4)
+beta1 = rnorm(Nrep, 0.007, 0.006)
+beta2 = rnorm(Nrep, 0.0035, 0.0004)
+beta3 = rnorm(Nrep, 0.006, 0.00035)
+
+prob_ex = beta0 + beta1 * (2-mean(x1)) + beta2 * (100-mean(x2)) + beta3 * (25-mean(x3))
+exp_prob_ex = exp(prob_ex) / (1 + exp(prob_ex))
+prob_sim = as.matrix(exp_prob_ex)
+
+x <- as.character(mean(exp_prob_ex))
+
+exp_prob_ex <- data.frame(exp_prob_ex)
+ggplot(exp_prob_ex, aes(exp_prob_ex)) +
+  geom_histogram(fill = "#f56d0d", color = "#f56d0d") +
+  ggtitle("Distribution of Prior Probability", subtitle = "For a woman with 2 children, glucose level of 100, and a BMI of 25") +
+  xlab("Probability of Diabetes") +
+  annotate("text", x = 0.4, y = 60, label = "Mean: ") +
+  annotate("text", x = 0.50, y = 60, label = x) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+
+mean(exp_prob_ex[,1])
+```
+Based on this sensitivity analysis using smaller values of mu and sigma for all four betas, we observe that the frequency of the odds of a diabetes diagnosis being between 0.1 - 0.2 is greater than it was with our original prior model. Now, we will see how this new prior changes the posterior distribution.
+
+Lower explanatory variable values also result in a lighter right skew of the distribution of the odds of a diabetes diagnosis among Native Pima women. This seems counter intuitive to our model which suggests as values of our predictors increase, so do the odds of a diagnosis of diabetes.
+
+```{r}
+y = diabetes$Outcome
+x1 = diabetes$Pregnancies
+x2 = diabetes$Glucose
+x3 = diabetes$BMI
+x1c = x1 - mean(x1)
+x2c = x2 - mean(x2)
+x3c = x3 - mean(x3)
+
+
+model_string <- "model{
+
+# Likelihood
+  for(i in 1:n){
+  y[i] ~ dbern(prob[i])
+  logit(prob[i]) <- beta[1] + beta[2]*x1c[i] + beta[3]*x2c[i] + beta[4]*x3c[i]
+    }
+  
+# Prior for beta's
+  beta[1] ~ dnorm(-2.5, 1 / 0.4^2)
+  beta[2] ~ dnorm(0.007, 1 / 0.006^2)
+  beta[3] ~ dnorm(0.0035, 1 / 0.0004^2)
+  beta[4] ~ dnorm(0.006, 1 / 0.00035^2)
+}"
+
+model <- jags.model(textConnection(model_string),
+                    data = list(n = n, y = y, x1c = x1c, x2c = x2c, x3c = x3c),
+                    n.chains = 5)
+```
+
+```{r}
+# burn in for first 1000 samples
+update(model, 1000, progress.bar = 'none')
+
+posterior_sample <- coda.samples(model, variable.names = c('beta'), n.iter = 10000, progress.bar = 'none')
+
+summary(posterior_sample)
+```
+
+```{r}
+params = as.matrix(posterior_sample)
+beta0 = params[, 1]
+beta1 = params[, 2]
+beta2 = params[, 3]
+beta3 = params[, 4]
+```
+
+```{r}
+source("DBDA2E-utilities.R")
+
+plotPost(exp(beta0))
+plotPost(exp(beta1))
+plotPost(exp(beta2))
+plotPost(exp(beta3))
+```
+
+After running the new model in JAGS under our first alternative posterior, we plotted a two posterior predictive distribution of probabilities: one for women with 2 pregnancies, a score of 100 on the OGTT test, and a BMI of 25, and one for women with 11 pregnancies, a score of 200, and a BMI of 45. The means of these probabilities are fairly similar to the ones from earlier, but slightly smaller. 
+
+```{r}
+prob_ex = beta0 + beta1 * (2-mean(x1)) + beta2 * (100-mean(x2)) + beta3 * (25-mean(x3))
+exp_prob_ex = exp(prob_ex) / (1 + exp(prob_ex))
+# hist(exp_prob_ex)
+
+# histograms of probabilities for women with 2 pregnancies, OGTT 100, BMI 25
+x <- as.character(mean(exp_prob_ex))
+y <- as.character(sd(exp_prob_ex))
+exp_prob_ex <- data.frame(exp_prob_ex)
+ggplot(exp_prob_ex, aes(exp_prob_ex)) +
+  geom_histogram(fill = "#228B22", color = "#228B22") +
+  ggtitle("Distribution of Probability", subtitle = "For a woman with 2 children, glucose level of 100, and a BMI of 25") +
+  xlab("Probability of Diabetes") +
+    annotate("text", x = 0.35, y = 10000, label = "Mean:") +
+  annotate("text", x = 0.4, y = 10000, label = x) +
+  annotate("text", x = 0.35, y = 7000, label = "SD:") +
+  annotate("text", x = 0.4, y = 7000, label = y) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+
+mean(exp_prob_ex[,1])
+```
+
+```{r}
+prob_ex = beta0 + beta1 * (11-mean(x1)) + beta2 * (200-mean(x2)) + beta3 * (45-mean(x3))
+exp_prob_ex = exp(prob_ex) / (1 + exp(prob_ex))
+
+# histograms of probabilities for women with 11 pregnancies, OGTT 200, BMI 45
+
+x <- as.character(mean(exp_prob_ex))
+y <- as.character(sd(exp_prob_ex))
+exp_prob_ex <- data.frame(exp_prob_ex)
+ggplot(exp_prob_ex, aes(exp_prob_ex)) +
+  geom_histogram(fill = "#FF4500", color = "#FF4500") +
+  ggtitle("Distribution of Probability", subtitle = "For a woman with 11 children, glucose level of 200, and a BMI of 45") +
+  xlab("Probability of Diabetes") +
+  annotate("text", x = 0.53, y = 4000, label = "Mean:") +
+  annotate("text", x = 0.56, y = 4000, label = x) +
+  annotate("text", x = 0.53, y = 3500, label = "SD:") +
+  annotate("text", x = 0.56, y = 3500, label = y) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+
+mean(exp_prob_ex[,1])
+```
+Thus, the changes we made to the prior didn't have a giant effect on the posterior, but overall, the probability of diabetes for the average woman was lower (both our high risk and low risk groups had lower probabilities of diabetes). We will run more sensitivity analysis, but using much larger values for the means.
+
+```{r high prior}
+Nrep = 1000
+
+x1 = rnorm(Nrep, 2, 2) # possible values of pregnancies
+x2 = rnorm(Nrep, 100, 30) # possible values of plasma glucose concentration after 2-hour OGTT
+x3 = rnorm(Nrep, 25, 6.5) # possible values of BMI
+
+beta0 = rnorm(Nrep, -1, 0.6)
+beta1 = rnorm(Nrep, 0.05, 0.08)
+beta2 = rnorm(Nrep, 0.03, 0.05)
+beta3 = rnorm(Nrep, 0.05, 0.03)
+
+prob_ex = beta0 + beta1 * (2-mean(x1)) + beta2 * (100-mean(x2)) + beta3 * (25-mean(x3))
+exp_prob_ex = exp(prob_ex) / (1 + exp(prob_ex))
+prob_sim = as.matrix(exp_prob_ex)
+
+x <- as.character(mean(exp_prob_ex))
+
+exp_prob_ex <- data.frame(exp_prob_ex)
+ggplot(exp_prob_ex, aes(exp_prob_ex)) +
+  geom_histogram(fill = "#AA336A", color = "#AA336A") +
+  ggtitle("Distribution of Probability", subtitle = "For a woman with 2 children, glucose level of 100, and a BMI of 25") +
+  xlab("Probability of Diabetes") +
+  annotate("text", x = 0.40, y = 40, label = "Mean: ") +
+  annotate("text", x = 0.45, y = 40, label = x) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+
+mean(exp_prob_ex[,1])
+```
+
+Based on our secondary sensitivity analysis using higher values of mu and sigma for each beta, we observe that the frequency of the odds of a diabetes diagnosis being above 0.3 is greater than it was with our original model. This prior gives a much wider range of possible probabilities than before, and has a much higher mean than the one before. Next we simulate the posterior distribution for this new prior, using the same process as before.
+
+```{r}
+y = diabetes$Outcome
+x1 = diabetes$Pregnancies
+x2 = diabetes$Glucose
+x3 = diabetes$BMI
+x1c = x1 - mean(x1)
+x2c = x2 - mean(x2)
+x3c = x3 - mean(x3)
+
+
+model_string <- "model{
+
+# Likelihood
+  for(i in 1:n){
+  y[i] ~ dbern(prob[i])
+  logit(prob[i]) <- beta[1] + beta[2]*x1c[i] + beta[3]*x2c[i] + beta[4]*x3c[i]
+    }
+  
+# Prior for beta's
+  beta[1] ~ dnorm(-1, 1 / 0.6^2)
+  beta[2] ~ dnorm(0.05, 1 / 0.08^2)
+  beta[3] ~ dnorm(0.03, 1 / 0.05^2)
+  beta[4] ~ dnorm(0.05, 1 / 0.03^2)
+}"
+
+model <- jags.model(textConnection(model_string),
+                    data = list(n = n, y = y, x1c = x1c, x2c = x2c, x3c = x3c),
+                    n.chains = 5)
+```
+
+```{r}
+# burn in for first 1000 samples
+update(model, 1000, progress.bar = 'none')
+
+posterior_sample <- coda.samples(model, variable.names = c('beta'), n.iter = 10000, progress.bar = 'none')
+
+summary(posterior_sample)
+```
+
+```{r}
+params = as.matrix(posterior_sample)
+beta0 = params[, 1]
+beta1 = params[, 2]
+beta2 = params[, 3]
+beta3 = params[, 4]
+```
+
+```{r}
+source("DBDA2E-utilities.R")
+
+plotPost(exp(beta0))
+plotPost(exp(beta1))
+plotPost(exp(beta2))
+plotPost(exp(beta3))
+```
+
+The plots of the parameters show that clearly, our effects have increased. To demonstrate further, we again create two posterior predictive distributions for our two groups of women.
+
+```{r}
+prob_ex = beta0 + beta1 * (2-mean(x1)) + beta2 * (100-mean(x2)) + beta3 * (25-mean(x3))
+exp_prob_ex = exp(prob_ex) / (1 + exp(prob_ex))
+# hist(exp_prob_ex)
+
+# histograms of probabilities for women with 2 pregnancies, OGTT 100, BMI 25
+x <- as.character(mean(exp_prob_ex))
+y <- as.character(sd(exp_prob_ex))
+exp_prob_ex <- data.frame(exp_prob_ex)
+ggplot(exp_prob_ex, aes(exp_prob_ex)) +
+  geom_histogram(fill = "#228B22", color = "#228B22") +
+  ggtitle("Distribution of Probability", subtitle = "For a woman with 2 children, glucose level of 100, and a BMI of 25") +
+  xlab("Probability of Diabetes") +
+    annotate("text", x = 0.15, y = 15000, label = "Mean:") +
+  annotate("text", x = 0.2, y = 15000, label = x) +
+  annotate("text", x = 0.15, y = 17500, label = "SD:") +
+  annotate("text", x = 0.2, y = 17500, label = y) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+
+mean(exp_prob_ex[,1])
+```
+
+```{r}
+prob_ex = beta0 + beta1 * (11-mean(x1)) + beta2 * (200-mean(x2)) + beta3 * (45-mean(x3))
+exp_prob_ex = exp(prob_ex) / (1 + exp(prob_ex))
+
+# histograms of probabilities for women with 11 pregnancies, OGTT 200, BMI 45
+
+x <- as.character(mean(exp_prob_ex))
+y <- as.character(sd(exp_prob_ex))
+exp_prob_ex <- data.frame(exp_prob_ex)
+ggplot(exp_prob_ex, aes(exp_prob_ex)) +
+  geom_histogram(fill = "#FF4500", color = "#FF4500") +
+  ggtitle("Distribution of Probability", subtitle = "For a woman with 11 children, glucose level of 200, and a BMI of 45") +
+  xlab("Probability of Diabetes") +
+  annotate("text", x = 0.8, y = 20000, label = "Mean:") +
+  annotate("text", x = 0.95, y = 20000, label = x) +
+  annotate("text", x = 0.8, y = 25000, label = "SD:") +
+  annotate("text", x = 0.95, y = 25000, label = y) +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+
+mean(exp_prob_ex[,1])
+```
+
+Our model was extremely sensitive once the prior changed this much! Now, almost all women in the sample are predicted to have diabetes! Obviously, these parameters were unrealistically large, but it is fascinating to see how now, all high risk women are predicted to have diabetes. For lower risk women though, the model says the probability of diabetes is very low, at about 8.8% on average.
+
+# Conclusion 
+
+Our initial estimate for the average increase in odds of a diabetes diagnosis among Native Pima women was by a factor of 0.37 for a one unit increase in each of the three predictors: number of pregnancies, plasma glucose concentrations after a 2-hour oral glucose test, and BMI. However, after accounting for data of diabetes diagnosis status of Pima women, the posterior average odds factor was almost two times lower (0.155). This indicates that our model gave a heavier weighting to the data as opposed to our prior beliefs about diabetes in the Pima community despite our initial levels of certainty being relatively high. Furthermore, our model is consistent with CDC claims about diabetes diagnosis in the Pima community. Overall, we can conclude that as values for pregnancies, plasma glucose, and BMI increase, so does the odds of diabetes among Pima women. 
+
+
